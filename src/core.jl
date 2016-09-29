@@ -6,6 +6,8 @@ import Base: setindex!, getindex, run
 const LIB_BASE = joinpath(dirname(@__FILE__), "..", "deps")
 const LIBTF = joinpath(LIB_BASE, "usr", "bin", "libtensorflow_c")
 
+include("py.jl")
+
 type Status
     ptr::Ptr{Void}
     function Status()
@@ -445,6 +447,10 @@ function Operation(ptr::Ptr)
     return self
 end
 
+type NodeNameNotFound <: Exception
+    name::String
+end
+
 function fillin_operation(op::Operation)
     op.filled_in && return
     my_desc = get_def(op)
@@ -463,6 +469,11 @@ function fillin_operation(op::Operation)
         graph = get(op.graph)
     end
     if has_field(my_desc, :input)
+        for name in my_desc.input
+            if isnull(get_node_by_name(graph, name))
+                throw(NodeNameNotFound(name))
+            end
+        end
         op.inputs = [Tensor((get_node_by_name(graph, name) |> get)) for name in my_desc.input]
         for input in op.inputs
             fillin_operation(input.op)
@@ -554,15 +565,32 @@ end
 function Operation(node_def::tensorflow.NodeDef)
     graph = get_def_graph()
     desc = NodeDescription(graph, node_def.op, node_def.name)
+    # This is a weird hack to deal with the fact that gradients/Gather_grad/concat/values_0 is 0 when it should be -1
+    # Maybe a bug in ProtoBuf.jl?
+    if node_def.op == "Const"
+        if false#ismatch(r"concat/values_\d+$", node_def.name) || ismatch(r"Slice/concat", node_def.name) #|| ismatch(r"ExpandDims/dim$", node_def.name)
+            info("op match found")
+            if load_proto(node_def.attr["value"]) == Int32[0]
+                info("Performing hack replacement")
+                node_def.attr["value"].tensor.int_val = Int32[-1]
+            elseif load_proto(node_def.attr["value"]) == Int32(0)
+                info("hack 2")
+                node_def.attr["value"].tensor.int_val = Int32[-1]
+            end
+
+        end
+    end
     if node_def.op == "DynamicStitch"
         inputs = []
+        ports = []
         for input in node_def.input
             input, port = parse_port_name(input)
             input_node = get_node_by_name(graph, input)|>get
             push!(inputs, input_node)
+            push!(ports, port)
         end
-        add_input(desc, [Tensor(inputs[1], 1), Tensor(inputs[2], 1)])
-        add_input(desc, [Tensor(inputs[3], 1), Tensor(inputs[4], 1)])
+        add_input(desc, [Tensor(inputs[1], ports[1]), Tensor(inputs[2], ports[2])])
+        add_input(desc, [Tensor(inputs[3], ports[3]), Tensor(inputs[4], ports[4])])
         return Operation(desc)
     end
     if node_def.op ∈ ("ConcatOffset", "Concat")
@@ -613,7 +641,7 @@ function Operation(node_def::tensorflow.NodeDef)
     end
     if isdefined(node_def, :attr)  # TODO: complete this
         for (attr_name, attr) in node_def.attr
-            if attr_name ∈ ("dtype", "T", "DstT", "SrcT")
+            if attr_name ∈ ("dtype", "T", "DstT", "SrcT", "Index")
                 ccall((:TF_SetAttrType, LIBTF), Void, (Ptr{Void}, Cstring, Cint), desc.ptr, attr_name, attr._type)
             elseif attr_name == "value"
                 desc["value"] = RawTensor(load_proto(attr.tensor))
@@ -637,6 +665,8 @@ function Operation(node_def::tensorflow.NodeDef)
                 desc["use_cudnn_on_gpu"] = attr.b
             elseif attr_name == "axis"
                 desc["axis"] = attr.i
+            elseif attr_name ∈ ("begin_mask", "ellipsis_mask", "shrink_axis_mask", "new_axis_mask", "end_mask")
+                desc[attr_name] = attr.i
             else
                 warn("Unrecognized attribute $attr_name")
             end
@@ -714,7 +744,7 @@ function Base.show(io::IO, t::Tensor)
     print(io, "<Tensor $(node_name(t.op)):$(t.value_index) shape=$(shape) dtype=$(dtype)>")
 end
 
-node_name(t::AbstractTensor) = node_name(Tensor(t).op)
+node_name(t::AbstractTensor) = (node_name(Tensor(t).op), Tensor(t).value_index)
 
 Tensor(op::Operation) = Tensor(op, 1)
 
@@ -1058,30 +1088,21 @@ end
 
 get_node_by_name(name) = get_node_by_name(get_def_graph(), name)
 
-const py_proc = Ref{Int}()
-
-function spawn_py_process()
-    addprocs(1)
-    py_proc[] = nprocs()
-    eval(Main, :(@everywhere using TensorFlow))
-    path = joinpath(dirname(@__FILE__), "py.jl")
-    remotecall_wait(py_proc[]) do
-        eval(TensorFlow, quote
-            include($path)
-        end)
-    end
-    nothing
-end
-
 function gradients(y, x::AbstractArray)
     x_names = [node_name(_) for _ in x]
     y_name = node_name(y)
     graph_proto = get_def_graph() |> get_proto
-    node_protos, grad_names = remotecall_fetch(py_proc[]) do
-        py_gradients(graph_proto, x_names, y_name)
-    end
+    node_protos, grad_names = py_gradients(graph_proto, x_names, y_name)
     extend_graph(get_def_graph(), node_protos)
-    return [Tensor(get_node_by_name(_)|>get, 1) for _ in grad_names]
+    out = []
+    for name in grad_names
+        if isa(name, String)
+            push!(out, Tensor(get_node_by_name(name)|>get, 1))
+        else
+            push!(out, IndexedSlices(Tensor(get_node_by_name(name[1])|>get,1), Tensor(get_node_by_name(name[2])|>get,1)))
+        end
+    end
+    return out
 end
 
 gradients(y, x) = gradients(y, [x])[1]
@@ -1102,3 +1123,8 @@ end
 
 get_op(op::Operation) = op
 get_op(t::AbstractTensor) = Tensor(t).op
+
+type IndexedSlices
+    values::Tensor
+    indices::Tensor
+end

@@ -29,7 +29,8 @@ l2_loss,
 log_poisson_loss,
 nce_loss,
 sampled_softmax_loss,
-batch_normalization
+batch_normalization,
+seq2seq
 
 import TensorFlow
 const tf = TensorFlow
@@ -74,10 +75,13 @@ function rnn(cell, inputs; initial_state=nothing, dtype=nothing, sequence_length
             error("dtype must be set if initial_state is not provided")
         end
         shape = get_shape(inputs[1])
-        if shape == -1
+        if shape.rank_unknown
             error("Shape of input is unknown")
         end
-        batch_size = shape[1]
+        if isnull(shape.dims[1])
+            error("Batch size of input is unknown")
+        end
+        batch_size = get(shape.dims[1])
         initial_state = zero_state(cell, batch_size, dtype)
     end
     outputs = Tensor[]
@@ -135,10 +139,15 @@ function log_softmax(logits; name="")
 end
 
 function embedding_lookup(params, ids; partition_strategy="mod", name="", validate_indices=true)
-    if ndims(params) > 0
-        error("Embedding lookup across multiple parameter tensors not supported yet")
+    ids = Tensor(ids)
+    if isa(params, AbstractArray)
+        if length(params) > 1
+            error("Embedding lookup across multiple parameter tensors not supported yet")
+        else
+            params = params[1]
+        end
     end
-    gather(params, id; name=name)
+    tf.gather(params, ids; name=name)
 end
 
 @not_implemented function embedding_lookup_sparse()
@@ -161,8 +170,12 @@ function in_top_k(predictions, targets, k; name="")
     Tensor(Operation(desc))
 end
 
-function l2_loss(t, name="")
-    reduce_sum(t.*t; name=name)
+function l2_loss(t; name="L2_Loss")
+    local out
+    with_op_name(name) do
+        out = sqrt(reduce_sum(t.*t; name=name))
+    end
+    out
 end
 
 @not_implemented function nce_loss()
@@ -238,5 +251,6 @@ end
 @not_implemented function weighted_cross_entropy_with_logits()
 end
 
+include("seq2seq.jl")
 
 end

@@ -31,6 +31,7 @@ expand_dims,
 argmin,
 one_hot,
 random_uniform,
+random_normal,
 nn,
 image,
 Variable,
@@ -73,14 +74,23 @@ merge_all_summaries,
 image_summary,
 io,
 AbstractTensor,
-Tensor
+Tensor,
+add_n,
+clip_by_value,
+clip_by_norm,
+clip_by_average_norm,
+clip_by_global_norm,
+global_norm
 
 
 function __init__()
     c_deallocator[] = cfunction(deallocator, Void, (Ptr{Void}, Csize_t, Ptr{Void}))
-    if myid() == 1
-        set_def_graph(Graph())
-        spawn_py_process()
+    set_def_graph(Graph())
+    try
+        py_tf[] = pyimport("tensorflow")
+        pywrap_tensorflow[] = pyimport("tensorflow.python.pywrap_tensorflow")
+    catch err
+        error("The Python TensorFlow package could not be imported. You must install Python TensorFlow before using this package.")
     end
 end
 
@@ -98,4 +108,6 @@ include("ops.jl")
 include("train.jl")
 include("io.jl")
 
+include("layers/fully_connected.jl")
+export fully_connected
 end

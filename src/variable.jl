@@ -7,10 +7,11 @@ type Variable <: AbstractTensor
     Variable() = new()
 end
 
-function Variable(initial_value; name="", trainable=true)
+function Variable(initial_value; name="", trainable=true, literal_name=false)
     self = Variable()
-
-    name = get_name(name)
+    if !literal_name
+        name = get_name(name)
+    end
     desc = NodeDescription("Variable", name)
     desc["dtype"] = eltype(initial_value)
     desc["shape"] = size(initial_value)
@@ -33,6 +34,35 @@ function assign(v::Variable, value)
     add_input(desc, v.var_node)
     add_input(desc, Tensor(value))
     return Tensor(Operation(desc), 1)
+end
+
+function assign_sub(v::Variable, value)
+    desc = NodeDescription("AssignSub", get_name())
+    add_input(desc, v.var_node)
+    add_input(desc, Tensor(value))
+    return Tensor(Operation(desc), 1)
+end
+
+function scatter_update(ref, indices, updates; name="ScatterUpdate")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("ScatterUpdate")
+        add_input(desc, Tensor(ref))
+        add_input(desc, Tensor(indices))
+        add_input(desc, Tensor(updates))
+    end
+    Tensor(Operation(desc))
+end
+
+function scatter_sub(ref, indices, updates; name="ScatterSub")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("ScatterSub")
+        add_input(desc, Tensor(ref))
+        add_input(desc, Tensor(indices))
+        add_input(desc, Tensor(updates))
+    end
+    Tensor(Operation(desc))
 end
 
 Base.setindex!(v::Variable, value) = assign(v, value)
@@ -106,7 +136,7 @@ function get_variable(var_name, shape, dtype; trainable=true, kwargs...)
             else
                 iv = rand(initializer, 1)[1]
             end
-            v = Variable(map(dtype, iv), name=name, trainable=trainable)
+            v = Variable(map(dtype, iv), name=name, trainable=trainable, literal_name=true)
         end
     finally
         pop!(scope_stack)
