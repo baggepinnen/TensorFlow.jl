@@ -156,14 +156,97 @@ all elements but all later dimensions may vary.
 * `time_major`: Shape format for `inputs` and `outputs` `Tensor`s. Determines whether the first dimension of each is `max_time` (`true`) or `batch_size` (`false`, default). `true` is more efficient but is the transpose of most TensorFlow operations.
 * `scope`: `VariableScope` for the subgraph. Defaults to `RNN`.
 """
-@not_implemented function dynamic_rnn(cell, inputs; sequence_length=nothing, initial_state=nothing, dtype=nothing, parallel_iterations=nothing, swap_memory=false, time_major=false, scope="RNN")
-
+function dynamic_rnn(cell, inputs; sequence_length=nothing, initial_state=nothing, dtype=nothing, parallel_iterations=32, swap_memory=false, time_major=false, scope="RNN")
+    # TODO use sequence length
+    # TODO do some input checking
+    if initial_state === nothing
+        if dtype === nothing
+            error("dtype must be set if initial_state is not provided")
+        end
+        shape = get_shape(inputs[1])
+        if shape.rank_unknown
+            error("Shape of input is unknown")
+        end
+        if isnull(shape.dims[1])
+            error("Batch size of input is unknown")
+        end
+        batch_size = get(shape.dims[1])
+        initial_state = zero_state(cell, batch_size, dtype)
+    end
+    max_time = size(inputs, 2)
+    if time_major
+        max_time = size(inputs, 1)
+    end
+    outputs = Tensor[]
+    local output
+    state = initial_state
+    for idx in 1:max_time
+        begin_ = zeros(rank(input))
+        size_  = -ones(rank(input))
+        begin_[2] = idx
+        size_[2] = 1
+        if time_major
+            begin_[1] = idx
+            size_[1] = 1
+        end
+        input_slice = slice(input, begin_, size_)
+        variable_scope(scope; reuse=idx>1) do
+            output, state = cell(input_slice, state)
+        end
+        push!(outputs, output)
+    end
+    return outputs, state
 end
 
-@not_implemented function state_saving_rnn()
+@not_implemented function state_saving_rnn(cell, inputs, state_saver, state_name; sequence_length=nothing, scope="RNN")
 end
 
-@not_implemented function bidirectional_rnn()
+function bidirectional_rnn(cell_fw, cell_bw, inputs; sequence_length=nothing, initial_state_fw=nothing, initial_state_bw=nothing, dtype=nothing, scope="BiRNN")
+    # TODO use sequence length
+    if initial_state_fw === nothing
+        if dtype === nothing
+            error("dtype must be set if initial_state is not provided")
+        end
+        shape = get_shape(inputs[1])
+        if shape.rank_unknown
+            error("Shape of input is unknown")
+        end
+        if isnull(shape.dims[1])
+            error("Batch size of input is unknown")
+        end
+        batch_size = get(shape.dims[1])
+        initial_state_fw = zero_state(cell_fw, batch_size, dtype)
+    end
+    if initial_state_bw === nothing
+        if dtype === nothing
+            error("dtype must be set if initial_state is not provided")
+        end
+        shape = get_shape(inputs[1])
+        if shape.rank_unknown
+            error("Shape of input is unknown")
+        end
+        if isnull(shape.dims[1])
+            error("Batch size of input is unknown")
+        end
+        batch_size = get(shape.dims[1])
+        initial_state_bw = zero_state(cell_bw, batch_size, dtype)
+    end
+    outputs = Tensor[]
+    local output_fw
+    local output_bw
+    state_fw = initial_state_fw
+    state_bw = initial_state_bw
+    for (idx, input) in enumerate(inputs)
+        variable_scope(scope; reuse=idx>1) do
+            output_fw, state_fw = cell(input, state_fw)
+            output_bw, state_bw = cell(input, state_bw)
+        end
+        push!(outputs, [output_fw, output_bw])
+    end
+    return outputs, state_fw, state_bw
+end
+
+@not_implemented function bidirectional_dynamic_rnn(cell_fw, cell_bw, inputs; sequence_length=nothing, initial_state_fw=nothing, initial_state_bw=nothing, dtype=nothing, parallel_interations=nothing, swap_memory=false, time_major=false, scope="BiRNN")
 end
 
 """
@@ -282,7 +365,7 @@ function in_top_k(predictions, targets, k; name="InTopK")
     local desc
     with_op_name(name) do
         desc = NodeDescription("InTopK")
-        add_input(desc, cast(Tensor(predictions), Float32))
+        add_input(desc, tf.cast(Tensor(predictions), Float32))
         add_input(desc, Tensor(targets)-1)
         desc["k"] = Int64(k)
     end
@@ -302,14 +385,60 @@ function l2_loss(t; name="L2_Loss")
     out
 end
 
-@not_implemented function nce_loss()
+function nce_loss(weights, biases, inputs, labels, num_sampled, num_classes;
+                  num_true=1, sampled_values=nothing,
+                  remove_accidental_hits=false, partition_strategy="mod",
+                  name="NceLoss")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("NceLoss")
+        add_input(desc, Tensor(weights))
+        add_input(desc, Tensor(biases))
+        add_input(desc, Tensor(inputs))
+        add_input(desc, Tensor(labels) - 1)
+        add_input(desc, Int64(num_sampled))
+        add_input(desc, Int64(num_classes))
+        desc["num_true"] = Int64(num_true)
+        desc["sampled_values"] = sampled_values
+        desc["remove_accidental_hits"] = remove_accidental_hits
+        desc["partition_strategy"] = partition_strategy
+    end
+    Tensor(Operation(desc), 1)
 end
 
-@not_implemented function sampled_softmax_loss()
+function sampled_softmax_loss(weights, biases, inputs, labels, num_sampled, num_classes;
+                  num_true=1, sampled_values=nothing,
+                  remove_accidental_hits=false, partition_strategy="mod",
+                  name="SampledSoftmaxLoss")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("SampledSoftmaxLoss")
+        add_input(desc, Tensor(weights))
+        add_input(desc, Tensor(biases))
+        add_input(desc, Tensor(inputs))
+        add_input(desc, Tensor(labels) - 1)
+        add_input(desc, Int64(num_sampled))
+        add_input(desc, Int64(num_classes))
+        desc["num_true"] = Int64(num_true)
+        desc["sampled_values"] = sampled_values
+        desc["remove_accidental_hits"] = remove_accidental_hits
+        desc["partition_strategy"] = partition_strategy
+    end
+    Tensor(Operation(desc), 1)
 end
 
-@not_implemented function batch_normalization(x, mean, variance, offset, scale, variable_epsilon; name="")
-
+function batch_normalization(x, mean, variance, offset, scale, variable_epsilon; name="BatchNormalization")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("BatchNormalization")
+        add_input(desc, Tensor(x))
+        add_input(desc, Tensor(mean))
+        add_input(desc, Tensor(variance))
+        add_input(desc, Tensor(offset))
+        add_input(desc, Tensor(scale))
+        add_input(desc, variable_epsilon)
+    end
+    Tensor(Operation(desc), 1)
 end
 
 function local_response_normalization(input; depth_radius=5, bias=1.0, alpha=1.0, beta=0.5, name="LRN")
@@ -359,7 +488,15 @@ end
 @not_implemented function batch_norm_with_global_normalization()
 end
 
-@not_implemented function bias_add()
+function bias_add(value, bias; data_format="NHWC", name="BiasAdd")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("BiasAdd")
+        add_input(desc, Tensor(value))
+        add_input(desc, Tensor(bias))
+        desc["data_format"] = data_format
+    end
+    Tensor(Operation(desc), 1)
 end
 
 function conv1d(value, filters, strides, padding; data_format="NHWC", name="Conv1D")
@@ -423,6 +560,9 @@ function erosion2d(value, kernel, strides, rates, padding; name="Erosion2D")
         set_attr_list(desc, "strides", strides)
     end
     Tensor(Operation(desc), 1)
+end
+
+@not_implemented function learned_unigram_candidate_sampler()
 end
 
 @not_implemented function fixed_unigram_candidate_sampler()
