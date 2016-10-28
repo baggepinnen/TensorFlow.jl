@@ -156,14 +156,97 @@ all elements but all later dimensions may vary.
 * `time_major`: Shape format for `inputs` and `outputs` `Tensor`s. Determines whether the first dimension of each is `max_time` (`true`) or `batch_size` (`false`, default). `true` is more efficient but is the transpose of most TensorFlow operations.
 * `scope`: `VariableScope` for the subgraph. Defaults to `RNN`.
 """
-@not_implemented function dynamic_rnn(cell, inputs; sequence_length=nothing, initial_state=nothing, dtype=nothing, parallel_iterations=nothing, swap_memory=false, time_major=false, scope="RNN")
-
+function dynamic_rnn(cell, inputs; sequence_length=nothing, initial_state=nothing, dtype=nothing, parallel_iterations=32, swap_memory=false, time_major=false, scope="RNN")
+    # TODO use sequence length
+    # TODO do some input checking
+    if initial_state === nothing
+        if dtype === nothing
+            error("dtype must be set if initial_state is not provided")
+        end
+        shape = get_shape(inputs[1])
+        if shape.rank_unknown
+            error("Shape of input is unknown")
+        end
+        if isnull(shape.dims[1])
+            error("Batch size of input is unknown")
+        end
+        batch_size = get(shape.dims[1])
+        initial_state = zero_state(cell, batch_size, dtype)
+    end
+    max_time = size(inputs, 2)
+    if time_major
+        max_time = size(inputs, 1)
+    end
+    outputs = Tensor[]
+    local output
+    state = initial_state
+    for idx in 1:max_time
+        begin_ = zeros(rank(input))
+        size_  = -ones(rank(input))
+        begin_[2] = idx
+        size_[2] = 1
+        if time_major
+            begin_[1] = idx
+            size_[1] = 1
+        end
+        input_slice = slice(input, begin_, size_)
+        variable_scope(scope; reuse=idx>1) do
+            output, state = cell(input_slice, state)
+        end
+        push!(outputs, output)
+    end
+    return outputs, state
 end
 
-@not_implemented function state_saving_rnn()
+@not_implemented function state_saving_rnn(cell, inputs, state_saver, state_name; sequence_length=nothing, scope="RNN")
 end
 
-@not_implemented function bidirectional_rnn()
+function bidirectional_rnn(cell_fw, cell_bw, inputs; sequence_length=nothing, initial_state_fw=nothing, initial_state_bw=nothing, dtype=nothing, scope="BiRNN")
+    # TODO use sequence length
+    if initial_state_fw === nothing
+        if dtype === nothing
+            error("dtype must be set if initial_state is not provided")
+        end
+        shape = get_shape(inputs[1])
+        if shape.rank_unknown
+            error("Shape of input is unknown")
+        end
+        if isnull(shape.dims[1])
+            error("Batch size of input is unknown")
+        end
+        batch_size = get(shape.dims[1])
+        initial_state_fw = zero_state(cell_fw, batch_size, dtype)
+    end
+    if initial_state_bw === nothing
+        if dtype === nothing
+            error("dtype must be set if initial_state is not provided")
+        end
+        shape = get_shape(inputs[1])
+        if shape.rank_unknown
+            error("Shape of input is unknown")
+        end
+        if isnull(shape.dims[1])
+            error("Batch size of input is unknown")
+        end
+        batch_size = get(shape.dims[1])
+        initial_state_bw = zero_state(cell_bw, batch_size, dtype)
+    end
+    outputs = Tensor[]
+    local output_fw
+    local output_bw
+    state_fw = initial_state_fw
+    state_bw = initial_state_bw
+    for (idx, input) in enumerate(inputs)
+        variable_scope(scope; reuse=idx>1) do
+            output_fw, state_fw = cell(input, state_fw)
+            output_bw, state_bw = cell(input, state_bw)
+        end
+        push!(outputs, [output_fw, output_bw])
+    end
+    return outputs, state_fw, state_bw
+end
+
+@not_implemented function bidirectional_dynamic_rnn(cell_fw, cell_bw, inputs; sequence_length=nothing, initial_state_fw=nothing, initial_state_bw=nothing, dtype=nothing, parallel_interations=nothing, swap_memory=false, time_major=false, scope="BiRNN")
 end
 
 """
@@ -187,9 +270,10 @@ function dropout(x, keep_prob; noise_shape=nothing, seed=0, name="Dropout")
             noise_shape = shape(x)
         end
         r = random_uniform(noise_shape, 0, 1, seed=seed, dtype=eltype(x))
-        y = x_scaled .* floor(keep_prob+r)
+            y = x_scaled .* floor(keep_prob+r)
+        end
+        y
     end
-    y
 end
 
 function sigmoid_cross_entropy_with_logits(logits, targets; name="")
@@ -217,7 +301,7 @@ function log_softmax(logits; name="LogSoftmax")
 end
 
 """
-    embedding_lookup(params, ids; partition_strategy="mod", name="", validate_indices=true)
+embedding_lookup(params, ids; partition_strategy="mod", name="", validate_indices=true)
 
 Looks up values of `ids` in `params`. Currently only supports one `Tensor` in `params`.
 
@@ -281,7 +365,7 @@ function in_top_k(predictions, targets, k; name="InTopK")
     local desc
     with_op_name(name) do
         desc = NodeDescription("InTopK")
-        add_input(desc, cast(Tensor(predictions), Float32))
+        add_input(desc, tf.cast(Tensor(predictions), Float32))
         add_input(desc, Tensor(targets)-1)
         desc["k"] = Int64(k)
     end
@@ -301,14 +385,60 @@ function l2_loss(t; name="L2_Loss")
     out
 end
 
-@not_implemented function nce_loss()
+function nce_loss(weights, biases, inputs, labels, num_sampled, num_classes;
+                  num_true=1, sampled_values=nothing,
+                  remove_accidental_hits=false, partition_strategy="mod",
+                  name="NceLoss")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("NceLoss")
+        add_input(desc, Tensor(weights))
+        add_input(desc, Tensor(biases))
+        add_input(desc, Tensor(inputs))
+        add_input(desc, Tensor(labels) - 1)
+        add_input(desc, Int64(num_sampled))
+        add_input(desc, Int64(num_classes))
+        desc["num_true"] = Int64(num_true)
+        desc["sampled_values"] = sampled_values
+        desc["remove_accidental_hits"] = remove_accidental_hits
+        desc["partition_strategy"] = partition_strategy
+    end
+    Tensor(Operation(desc), 1)
 end
 
-@not_implemented function sampled_softmax_loss()
+function sampled_softmax_loss(weights, biases, inputs, labels, num_sampled, num_classes;
+                  num_true=1, sampled_values=nothing,
+                  remove_accidental_hits=false, partition_strategy="mod",
+                  name="SampledSoftmaxLoss")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("SampledSoftmaxLoss")
+        add_input(desc, Tensor(weights))
+        add_input(desc, Tensor(biases))
+        add_input(desc, Tensor(inputs))
+        add_input(desc, Tensor(labels) - 1)
+        add_input(desc, Int64(num_sampled))
+        add_input(desc, Int64(num_classes))
+        desc["num_true"] = Int64(num_true)
+        desc["sampled_values"] = sampled_values
+        desc["remove_accidental_hits"] = remove_accidental_hits
+        desc["partition_strategy"] = partition_strategy
+    end
+    Tensor(Operation(desc), 1)
 end
 
-@not_implemented function batch_normalization(x, mean, variance, offset, scale, variable_epsilon; name="")
-
+function batch_normalization(x, mean, variance, offset, scale, variable_epsilon; name="BatchNormalization")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("BatchNormalization")
+        add_input(desc, Tensor(x))
+        add_input(desc, Tensor(mean))
+        add_input(desc, Tensor(variance))
+        add_input(desc, Tensor(offset))
+        add_input(desc, Tensor(scale))
+        add_input(desc, variable_epsilon)
+    end
+    Tensor(Operation(desc), 1)
 end
 
 function local_response_normalization(input; depth_radius=5, bias=1.0, alpha=1.0, beta=0.5, name="LRN")
@@ -358,7 +488,15 @@ end
 @not_implemented function batch_norm_with_global_normalization()
 end
 
-@not_implemented function bias_add()
+function bias_add(value, bias; data_format="NHWC", name="BiasAdd")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("BiasAdd")
+        add_input(desc, Tensor(value))
+        add_input(desc, Tensor(bias))
+        desc["data_format"] = data_format
+    end
+    Tensor(Operation(desc), 1)
 end
 
 function conv1d(value, filters, strides, padding; data_format="NHWC", name="Conv1D")
@@ -424,6 +562,9 @@ function erosion2d(value, kernel, strides, rates, padding; name="Erosion2D")
     Tensor(Operation(desc), 1)
 end
 
+@not_implemented function learned_unigram_candidate_sampler()
+end
+
 @not_implemented function fixed_unigram_candidate_sampler()
 end
 
@@ -475,4 +616,86 @@ end
 
 include("seq2seq.jl")
 
+
+
+function sufficient_statistics(x, axes, shift=nothing, keep_dims=False, name=nothing)
+    axes = list(set(axes))
+    with_op_name(name == nothing ? "sufficient_statistics" : name) do
+        x = Tensor(x, name="x")
+        x_shape = get_shape(x)
+        if is_fully_defined(x_shape)
+            counts = 1
+            for d in axes
+                counts *= x_shape[d].value
+            end
+            counts = constant(counts, dtype=x.dtype)
+        else  # shape needs to be inferred at runtime.
+            x_dims = gather(shape(x), axes)
+            counts = cast(reduce_prod(x_dims), x.dtype, name="count")
+        end
+        if shift != nothing
+            shift = Tensor(shift, name="shift")
+            m_ss = sub(x, shift)
+            v_ss = squared_difference(x, shift)
+        else  # no shift.
+            m_ss = x
+            v_ss = square(x)
+        end
+        m_ss = reduce_sum(m_ss, axes, keep_dims=keep_dims, name="mean_ss")
+        v_ss = reduce_sum(v_ss, axes, keep_dims=keep_dims, name="var_ss")
+    end
+    return counts, m_ss, v_ss, shift
+
+end
+
+
+function moments(x, axes, shift=nothing, name="Moments", keep_dims=false)
+    with_op_name(name, "moments") do
+        counts, m_ss, v_ss, shift = sufficient_statistics(x, axes, shift=shift, keep_dims=keep_dims, name=name)
+
+        mean, variance = normalize_moments(counts, m_ss, v_ss, shift, name=name)
+        return (mean, variance)
+    end
+end
+
+
+function normalize_moments(counts, mean_ss, variance_ss, shift, name=nothing)
+    """Calculate the mean and variance of based on the sufficient statistics.
+    Args:
+    counts: A `Tensor` containing a the total count of the data (one value).
+    mean_ss: A `Tensor` containing the mean sufficient statistics: the (possibly
+    shifted) sum of the elements to average over.
+    variance_ss: A `Tensor` containing the variance sufficient statistics: the
+    (possibly shifted) squared sum of the data to compute the variance over.
+    shift: A `Tensor` containing the value by which the data is shifted for
+    numerical stability, or `nothing` if no shift was performed.
+    name: Name used to scope the operations that compute the moments.
+    Returns:
+    Two `Tensor` objects: `mean` and `variance`.
+    """
+    with_op_name(name == nothing ? "normalize" : name) do
+        divisor = inv(counts, name="divisor")
+        if shift != nothing
+            shifted_mean = mul(mean_ss, divisor, name="shifted_mean")
+            mean = add(shifted_mean, shift, name="mean")
+        else  # no shift.
+            shifted_mean = mul(mean_ss, divisor, name="mean")
+            mean = shifted_mean
+        end
+        variance = sub(mul(variance_ss, divisor),  square(shifted_mean), name="variance")
+        return (mean, variance)
+    end
+end
+
+
+function batch_normalization(x, mean, variance, offset, scale, variance_epsilon, name=nothing)
+
+    with_op_name(name == nothing ? "batchnorm" : name) do
+        inv = 1./sqrt(variance + variance_epsilon)
+        if scale != nothing
+            inv *= scale
+        end
+        offset != nothing ? x * inv + offset - mean * inv : -mean * inv
+    end
+end
 end
