@@ -93,6 +93,7 @@ for (bin_op, jl_func_name, tf_func_name) in [
     (:-, :sub, "Sub"),
     (:(.*), :mul, "Mul"),
     (:*, :matmul, "MatMul"),
+    (:⋅, :batch_matmul, "BatchMatMul"),
     (:/, :div, "Div"),
     (:^, :pow, "Pow")]
     @eval function $jl_func_name(n1::AbstractTensor, n2::AbstractTensor; name=$tf_func_name)

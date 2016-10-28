@@ -187,9 +187,10 @@ function dropout(x, keep_prob; noise_shape=nothing, seed=0, name="Dropout")
             noise_shape = shape(x)
         end
         r = random_uniform(noise_shape, 0, 1, seed=seed, dtype=eltype(x))
-        y = x_scaled .* floor(keep_prob+r)
+            y = x_scaled .* floor(keep_prob+r)
+        end
+        y
     end
-    y
 end
 
 function sigmoid_cross_entropy_with_logits(logits, targets; name="")
@@ -217,7 +218,7 @@ function log_softmax(logits; name="LogSoftmax")
 end
 
 """
-    embedding_lookup(params, ids; partition_strategy="mod", name="", validate_indices=true)
+embedding_lookup(params, ids; partition_strategy="mod", name="", validate_indices=true)
 
 Looks up values of `ids` in `params`. Currently only supports one `Tensor` in `params`.
 
@@ -475,4 +476,86 @@ end
 
 include("seq2seq.jl")
 
+
+
+function sufficient_statistics(x, axes, shift=nothing, keep_dims=False, name=nothing)
+    axes = list(set(axes))
+    with_op_name(name == nothing ? "sufficient_statistics" : name) do
+        x = Tensor(x, name="x")
+        x_shape = get_shape(x)
+        if is_fully_defined(x_shape)
+            counts = 1
+            for d in axes
+                counts *= x_shape[d].value
+            end
+            counts = constant(counts, dtype=x.dtype)
+        else  # shape needs to be inferred at runtime.
+            x_dims = gather(shape(x), axes)
+            counts = cast(reduce_prod(x_dims), x.dtype, name="count")
+        end
+        if shift != nothing
+            shift = Tensor(shift, name="shift")
+            m_ss = sub(x, shift)
+            v_ss = squared_difference(x, shift)
+        else  # no shift.
+            m_ss = x
+            v_ss = square(x)
+        end
+        m_ss = reduce_sum(m_ss, axes, keep_dims=keep_dims, name="mean_ss")
+        v_ss = reduce_sum(v_ss, axes, keep_dims=keep_dims, name="var_ss")
+    end
+    return counts, m_ss, v_ss, shift
+
+end
+
+
+function moments(x, axes, shift=nothing, name="Moments", keep_dims=false)
+    with_op_name(name, "moments") do
+        counts, m_ss, v_ss, shift = sufficient_statistics(x, axes, shift=shift, keep_dims=keep_dims, name=name)
+
+        mean, variance = normalize_moments(counts, m_ss, v_ss, shift, name=name)
+        return (mean, variance)
+    end
+end
+
+
+function normalize_moments(counts, mean_ss, variance_ss, shift, name=nothing)
+    """Calculate the mean and variance of based on the sufficient statistics.
+    Args:
+    counts: A `Tensor` containing a the total count of the data (one value).
+    mean_ss: A `Tensor` containing the mean sufficient statistics: the (possibly
+    shifted) sum of the elements to average over.
+    variance_ss: A `Tensor` containing the variance sufficient statistics: the
+    (possibly shifted) squared sum of the data to compute the variance over.
+    shift: A `Tensor` containing the value by which the data is shifted for
+    numerical stability, or `nothing` if no shift was performed.
+    name: Name used to scope the operations that compute the moments.
+    Returns:
+    Two `Tensor` objects: `mean` and `variance`.
+    """
+    with_op_name(name == nothing ? "normalize" : name) do
+        divisor = inv(counts, name="divisor")
+        if shift != nothing
+            shifted_mean = mul(mean_ss, divisor, name="shifted_mean")
+            mean = add(shifted_mean, shift, name="mean")
+        else  # no shift.
+            shifted_mean = mul(mean_ss, divisor, name="mean")
+            mean = shifted_mean
+        end
+        variance = sub(mul(variance_ss, divisor),  square(shifted_mean), name="variance")
+        return (mean, variance)
+    end
+end
+
+
+function batch_normalization(x, mean, variance, offset, scale, variance_epsilon, name=nothing)
+
+    with_op_name(name == nothing ? "batchnorm" : name) do
+        inv = 1./sqrt(variance + variance_epsilon)
+        if scale != nothing
+            inv *= scale
+        end
+        offset != nothing ? x * inv + offset - mean * inv : -mean * inv
+    end
+end
 end
