@@ -210,11 +210,9 @@ end
 for (jl_func_name, tf_func_name) in [
     (:log, "Log"),
     (:exp, "Exp"),
-    (:neg, "Neg"),
     (:ceil, "Ceil"),
     (:floor, "Floor"),
     (:sqrt, "Sqrt"),
-    (:square, "Square"),
     (:abs, "Abs"),
     (:cos, "Cos"),
     (:sin, "Sin"),
@@ -223,8 +221,6 @@ for (jl_func_name, tf_func_name) in [
     (:asin, "Asin"),
     (:acos, "Acos"),
     (:tanh, "Tanh"),
-    (:shape, "Shape"),
-    (:transpose, "Transpose"),
     #(:lbeta, "Lbeta"), #not working for now
     (:lgamma, "Lgamma"),
     (:erf, "Erf"),
