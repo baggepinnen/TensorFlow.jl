@@ -93,7 +93,9 @@ clip_by_value,
 clip_by_norm,
 clip_by_average_norm,
 clip_by_global_norm,
-global_norm
+global_norm,
+matmul,
+batch_matmul
 
 const pyproc = Ref{Int}()
 

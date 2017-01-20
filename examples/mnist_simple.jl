@@ -1,4 +1,4 @@
-# using TensorFlow
+using TensorFlow
 include("mnist_loader.jl")
 
 loader = DataLoader()

@@ -4,15 +4,15 @@
 Adds all input tensors element-wise.
 
 Args:
-  inputs: A list of `Tensor` objects, each with same shape and type.
-  name: A name for the operation (optional).
+inputs: A list of `Tensor` objects, each with same shape and type.
+name: A name for the operation (optional).
 
 Returns:
-  A `Tensor` of same shape and type as the elements of `inputs`.
+A `Tensor` of same shape and type as the elements of `inputs`.
 
 Raises:
-  ValueError: If `inputs` don't all have same shape and dtype or the shape
-  cannot be inferred.
+ValueError: If `inputs` don't all have same shape and dtype or the shape
+cannot be inferred.
 """
 function add_n(inputs; name="AddN")
     local desc
@@ -93,7 +93,6 @@ for (bin_op, jl_func_name, tf_func_name) in [
     (:-, :sub, "Sub"),
     (:(.*), :mul, "Mul"),
     (:*, :matmul, "MatMul"),
-    (:⋅, :batch_matmul, "BatchMatMul"),
     (:/, :div, "Div"),
     (:^, :pow, "Pow")]
     @eval function $jl_func_name(n1::AbstractTensor, n2::AbstractTensor; name=$tf_func_name)
@@ -116,7 +115,7 @@ end
 
 *(x::Number, n::AbstractTensor) = x.*n
 
-  # For supporting notation like `2x`
+# For supporting notation like `2x`
 ^(n::AbstractTensor, x::Int) = invoke(^, (AbstractTensor, Any), n, x)
 .^(n::AbstractTensor, x::Number) = n^x
 
@@ -209,6 +208,34 @@ for (jl_func_name, tf_func_name) in [
         end
         Tensor(Operation(desc), 1)
     end
+end
+
+function matmul(x::AbstractTensor,y::AbstractTensor; transpose_a=false, transpose_b=false, name="MatMul")
+    local desc
+    with_op_name(name) do
+        x = Tensor(x)
+        y = Tensor(y)
+        desc = NodeDescription("MatMul")
+        add_input(desc, x)
+        add_input(desc, y)
+        desc["transpose_a"] = transpose_a
+        desc["transpose_b"] = transpose_b
+    end
+    Tensor(Operation(desc), 1)
+end
+
+function batch_matmul(x::AbstractTensor,y::AbstractTensor; adj_x=false, adj_y=false, name="BatchMatMul")
+    local desc
+    with_op_name(name) do
+        x = Tensor(x)
+        y = Tensor(y)
+        desc = NodeDescription("BatchMatMul")
+        add_input(desc, x)
+        add_input(desc, y)
+        desc["adj_x"] = adj_x
+        desc["adj_y"] = adj_y
+    end
+    Tensor(Operation(desc), 1)
 end
 
 # Reductions
