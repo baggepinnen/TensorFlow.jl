@@ -102,10 +102,13 @@ function (cell::LSTMCell)(input, state)
     Wo = get_variable("Wo", [N, cell.hidden_size], T)
     Wg = get_variable("Wg", [N, cell.hidden_size], T)
 
-    Bi = get_variable("Bi", [cell.hidden_size], T)
-    Bf = get_variable("Bf", [cell.hidden_size], T)
-    Bo = get_variable("Bo", [cell.hidden_size], T)
-    Bg = get_variable("Bg", [cell.hidden_size], T)
+    local Bi, Bf, Bo, Bg
+    tf.variable_scope("Bias", initializer=tf.ConstantInitializer(0.0)) do
+        Bi = get_variable("Bi", [cell.hidden_size], T)
+        Bf = get_variable("Bf", [cell.hidden_size], T)
+        Bo = get_variable("Bo", [cell.hidden_size], T)
+        Bg = get_variable("Bg", [cell.hidden_size], T)
+    end
 
     # TODO make this all one multiply
     I = sigmoid(X*Wi + Bi)
@@ -135,7 +138,7 @@ function (cell::GRUCell)(input, state)
     Wr = get_variable("Wr", [N, cell.hidden_size], T)
     Wh = get_variable("Wh", [N, cell.hidden_size], T)
     local Bz, Br, Bh
-    tf.variable_scope("Bias", initializer=tf.ConstantInitializer(1.0)) do
+    tf.variable_scope("Bias", initializer=tf.ConstantInitializer(0.0)) do  # TODO doublecheck python also uses 0 for GRU
         Bz = get_variable("Bz", [cell.hidden_size], T)
         Br = get_variable("Br", [cell.hidden_size], T)
         Bh = get_variable("Bh", [cell.hidden_size], T)
@@ -174,5 +177,23 @@ function (cell::MultiRNNCell)(input, state)
     end
     input, states
 end
+
+type DropoutWrapper{CellType<:RNNCell} <: RNNCell
+    cell::CellType
+    output_keep_prob::Tensor
+end
+
+DropoutWrapper(cell; output_keep_prob=1.0) = DropoutWrapper(cell, Tensor(output_keep_prob))
+
+output_size(cell::DropoutWrapper) = output_size(cell.cell)
+state_size(cell::DropoutWrapper) = state_size(cell.cell)
+zero_state(cell::DropoutWrapper, batch_size, T) = zero_state(cell.cell, batch_size, T)
+
+function (wrapper::DropoutWrapper)(input, state)
+    output, new_state = wrapper.cell(input, state)
+    dropped_output = nn.dropout(output, wrapper.output_keep_prob)
+    dropped_output, new_state
+end
+
 
 end

@@ -140,17 +140,25 @@ type Session
             check_status(config_status)
         end
         status = Status()
-        ptr = ccall((:TF_NewSessionWithGraph, LIBTF), Ptr{Void}, (Ptr{Void}, Ptr{Void}, Ptr{Void}), graph.ptr, options.ptr, status.ptr)
+        ptr = ccall((:TF_NewSession, LIBTF), Ptr{Void}, (Ptr{Void}, Ptr{Void}, Ptr{Void}), graph.ptr, options.ptr, status.ptr)
         this = new(ptr, graph)
         check_status(status)
         finalizer(this, self->begin
             status = Status()
-            ccall((:TF_DeleteSessionWithGraph, LIBTF), Void, (Ptr{Void}, Ptr{Void}), self.ptr, status.ptr)
+            ccall((:TF_DeleteSession, LIBTF), Void, (Ptr{Void}, Ptr{Void}), self.ptr, status.ptr)
         end)
         return this
     end
 
-    Session() = Session(get_def_graph())
+    function Session(;config=nothing, allow_growth=false)
+        if config === nothing
+            config = tensorflow.ConfigProto()
+            gpu_config = tensorflow.GPUOptions()
+            gpu_config.allow_growth = allow_growth
+            config.gpu_options = gpu_config
+        end
+        Session(get_def_graph(), config)
+    end
 end
 
 
@@ -290,7 +298,7 @@ function RawTensor(data::Array{String}, is_scalar=false)
     for str in data
         write(b, UInt64(length(b_data.data)))
         varint_encode(b_data, sizeof(str))
-        write(b_data, str.data)
+        write(b_data, Vector{UInt8}(str))
     end
     seekstart(b_data)
     write(b, read(b_data))
@@ -795,7 +803,7 @@ end
 
 function setindex!(desc::NodeDescription, value::AbstractString, attr_name)
     value = String(value)
-    ccall((:TF_SetAttrString, LIBTF), Void, (Ptr{Void}, Cstring, Ptr{Void}, Cint), desc.ptr, attr_name, value.data, sizeof(value))
+    ccall((:TF_SetAttrString, LIBTF), Void, (Ptr{Void}, Cstring, Ptr{Void}, Cint), desc.ptr, attr_name, Vector{UInt8}(value), sizeof(value))
 end
 
 function set_attr_list(desc::NodeDescription, attr_name, list::Vector{Int})
@@ -974,4 +982,11 @@ get_op(t::AbstractTensor) = Tensor(t).op
 type IndexedSlices
     values::Tensor
     indices::Tensor
+end
+
+Base.eltype(i::IndexedSlices) = eltype(i.values)
+
+type IndexedSlicesValue
+    values
+    indices
 end

@@ -4,15 +4,15 @@
 Adds all input tensors element-wise.
 
 Args:
-inputs: A list of `Tensor` objects, each with same shape and type.
-name: A name for the operation (optional).
+  inputs: A list of `Tensor` objects, each with same shape and type.
+  name: A name for the operation (optional).
 
 Returns:
-A `Tensor` of same shape and type as the elements of `inputs`.
+  A `Tensor` of same shape and type as the elements of `inputs`.
 
 Raises:
-ValueError: If `inputs` don't all have same shape and dtype or the shape
-cannot be inferred.
+  ValueError: If `inputs` don't all have same shape and dtype or the shape
+  cannot be inferred.
 """
 function add_n(inputs; name="AddN")
     local desc
@@ -36,7 +36,7 @@ A `Tensor` of type `Int64`.
 function argmin(n::AbstractTensor, dim; name="ArgMin")
     local desc
     with_op_name(name) do
-        desc = NodeDescription("ArgMin", get_name(name))
+        desc = NodeDescription("ArgMin")
         add_input(desc, Tensor(n))
         add_input(desc, Tensor(convert_number(Int32,dim)))
     end
@@ -58,7 +58,7 @@ A `Tensor` of type `Int64`.
 function argmax(n::AbstractTensor, dim; name="ArgMax")
     local desc
     with_op_name(name) do
-        desc = NodeDescription("ArgMax", get_name(name))
+        desc = NodeDescription("ArgMax")
         add_input(desc, Tensor(n))
         add_input(desc, Tensor(convert_number(Int32, dim)))
     end
@@ -100,7 +100,6 @@ for (bin_op, jl_func_name, tf_func_name) in [
         with_op_name(name) do
             n1 = Tensor(n1)
             n2 = Tensor(n2)
-            name = get_name(name)
             desc = NodeDescription($tf_func_name)
             add_input(desc, n1)
             add_input(desc, n2)
@@ -113,12 +112,100 @@ for (bin_op, jl_func_name, tf_func_name) in [
     @eval $bin_op(n1, n2::AbstractTensor) = $jl_func_name(tf_promote(n2, n1), n2)
 end
 
+# TO DO provide the aliases for Base functions
+function matrix_solve(matrix, rhs; adjoint=false, name="MatrixSolve")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("MatrixSolve")
+        matrix = Tensor(matrix)
+        rhs = Tensor(rhs)
+        add_input(desc, matrix)
+        add_input(desc, rhs)
+        desc["adjoint"] = adjoint
+    end
+    Tensor(Operation(desc), 1)
+end
+
+function matrix_triangular_solve(matrix, rhs; lower=true, adjoint=false, name="MatrixTriangularSolve")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("MatrixTriangularSolve")
+        matrix = Tensor(matrix)
+        rhs = Tensor(rhs)
+        add_input(desc, matrix)
+        add_input(desc, rhs)
+        desc["lower"] = lower
+        desc["adjoint"] = adjoint
+    end
+    Tensor(Operation(desc), 1)
+end
+
+function matrix_solve_ls(matrix, rhs; l2regularizer=0., fast=true, name="MatrixSolveLS")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("MatrixSolveLS")
+        matrix = Tensor(matrix)
+        rhs = Tensor(rhs)
+        add_input(desc, matrix)
+        add_input(desc, rhs)
+        desc["l2regularizer"] = l2regularizer
+        desc["fast"] = fast
+    end
+    Tensor(Operation(desc), 1)
+end
+
+function self_adjoint_eig(tensor; name="SelfAdjointEig")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("SelfAdjointEigV2")
+        add_input(desc, Tensor(tensor))
+    end
+    op = Operation(desc)
+    [Tensor(op, 1), Tensor(op, 2)]
+end
+
+function cholesky(input; name="Cholesky")
+    local desc
+    with_op_name(name) do
+        desc = NodeDescription("Cholesky")
+        add_input(desc, Tensor(input))
+    end
+    Tensor(Operation(desc), 1)
+end
+
+function Base.cross(n1::AbstractTensor, n2::AbstractTensor; name="Cross")
+    local desc
+    with_op_name(name) do
+        n1 = Tensor(n1)
+        n2 = Tensor(n2)
+        desc = NodeDescription("Cross")
+        add_input(desc, n1)
+        add_input(desc, n2)
+    end
+    Tensor(Operation(desc), 1)
+end
+
 *(x::Number, n::AbstractTensor) = x.*n
 
-# For supporting notation like `2x`
+  # For supporting notation like `2x`
 ^(n::AbstractTensor, x::Int) = invoke(^, (AbstractTensor, Any), n, x)
 .^(n::AbstractTensor, x::Number) = n^x
 
+for (jl_func_name, tf_func_name) in [
+    (:sign, "Sign"),
+    (:neg, "Neg"),
+    (:square, "Square"),
+    (:shape, "Shape")]
+    @eval function $jl_func_name(n::AbstractTensor; name=$tf_func_name)
+        local desc
+        with_op_name(name) do
+            n = Tensor(n)
+            desc = NodeDescription($tf_func_name)
+            add_input(desc, n)
+        end
+        Tensor(Operation(desc), 1)
+    end
+end
 
 for (jl_func_name, tf_func_name) in [
     (:log, "Log"),
@@ -137,13 +224,19 @@ for (jl_func_name, tf_func_name) in [
     (:acos, "Acos"),
     (:tanh, "Tanh"),
     (:shape, "Shape"),
-    (:transpose, "Transpose")]
-    @eval function $jl_func_name(n::AbstractTensor; name=$tf_func_name)
+    (:transpose, "Transpose"),
+    #(:lbeta, "Lbeta"), #not working for now
+    (:lgamma, "Lgamma"),
+    (:erf, "Erf"),
+    (:erfc, "Erfc"),
+    (:real, "Real"),
+    (:imag, "Imag"),
+    (:conj, "Conj")]
+    @eval function Base.$jl_func_name(n::AbstractTensor; name=$tf_func_name)
         local desc
         with_op_name(name) do
             n = Tensor(n)
-            name = get_name(name)
-            desc = NodeDescription($tf_func_name, name)
+            desc = NodeDescription($tf_func_name)
             add_input(desc, n)
         end
         Tensor(Operation(desc), 1)
@@ -270,5 +363,19 @@ for reduction in [:sum, :prod, :min, :max, :all, :any, :mean]
             desc["keep_dims"] = keep_dims
             Tensor(Operation(desc), 1)
         end
+    end
+end
+
+for reduction in [:sum, :prod, :min, :max, :mean]
+    func_name = ucfirst(string(reduction))
+    @eval function $(Symbol("segment_", reduction))(n::AbstractTensor, segment_indices; name="Segment"*$func_name)
+        segment_indices = cast(Tensor(segment_indices), Int32) - 1
+        local desc
+        with_op_name(name) do
+            desc = NodeDescription("Segment"*$func_name)
+            add_input(desc, Tensor(n))
+            add_input(desc, Tensor(segment_indices))
+        end
+        Tensor(Operation(desc), 1)
     end
 end
