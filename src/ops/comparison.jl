@@ -8,9 +8,9 @@ for (func, op) in [
     (:greater, "Greater"),
     (:greater_equal, "GreaterEqual")]
 
-    @eval function $func(t1::AbstractTensor, t2::AbstractTensor; name=$op)
+    @eval function $func(t1::AbstractTensor, t2::AbstractTensor; name=nothing)
         local desc
-        with_op_name(name) do
+        with_op_name(name, $op) do
             desc = NodeDescription($op)
             add_input(desc, Tensor(t1))
             add_input(desc, Tensor(t2))
@@ -20,7 +20,7 @@ for (func, op) in [
 
 end
 
-import Base: .==, .!=, .>, .<, .≥, .≤
+import Base: .==, .!=, .>, .<, .≥, .≤, >, <, ≥, ≤
 
 for (func, sym) in [
     (:equal, :.==),
@@ -28,15 +28,21 @@ for (func, sym) in [
     (:less, :.<),
     (:less_equal, :.≤),
     (:greater, :.>),
-    (:greater_equal, :.≥)]
+    (:greater_equal, :.≥),
+    (:less, :<),
+    (:less_equal, :≤),
+    (:greater, :>),
+    (:greater_equal, :≥)
+    ]
 
     @eval $sym(t1::AbstractTensor, t2::AbstractTensor) = $func(t1, t2)
-
+    @eval $sym(t1::AbstractTensor, t2) = $func(t1, Tensor(t2))
+    @eval $sym(t1, t2::AbstractTensor) = $func(Tensor(t1), t2)
 end
 
-function Base.select(condition::AbstractTensor, t, e; name="Select")
+function Base.select(condition::AbstractTensor, t, e; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Select") do
         desc = NodeDescription("Select")
         add_input(desc, Tensor(condition))
         add_input(desc, Tensor(t))
@@ -46,15 +52,15 @@ function Base.select(condition::AbstractTensor, t, e; name="Select")
 end
 
 """
-Returns locations of `true` values in a boolean `Tensor`. Equivalent to `ifelse`.
+Returns locations of `true` values in a boolean `Tensor`.
 """
-function where(input; name="Where")
+function where(input; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Where") do
         desc = NodeDescription("Where")
         add_input(desc, Tensor(input))
     end
     Tensor(Operation(desc), 1)
 end
 
-Base.ifelse(input::AbstractTensor) = where(input)
+Base.find(input::AbstractTensor) = where(input)+1  # Convert from 0-based indices

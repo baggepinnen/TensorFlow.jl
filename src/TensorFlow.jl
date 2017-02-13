@@ -94,9 +94,16 @@ clip_by_norm,
 clip_by_average_norm,
 clip_by_global_norm,
 global_norm,
-matmul,
-batch_matmul,
-⊻
+Print,
+import_graph_def,
+tf_version,
+GraphInputOptions,
+get_operations,
+while_loop
+
+if !isdefined(Base, :⊻)
+    export ⊻
+end
 
 const pyproc = Ref{Int}()
 
@@ -113,8 +120,11 @@ function load_python_process()
     pyproc[] = nprocs()
     py_file = joinpath(dirname(@__FILE__), "py.jl")
     eval(Main, quote
+        # These have to be split for unclear reasons on .6
         remotecall_wait($(pyproc[]), $py_file) do py_file
             include(py_file)
+        end
+        remotecall_wait($(pyproc[])) do
             init()
         end
     end)
