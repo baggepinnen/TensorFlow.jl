@@ -25,9 +25,9 @@ TypeError: If x cannot be cast to the dtype.
 
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#cast
 """
-function cast(x::Tensor, dtype; name="Cast")
+function cast(x::Tensor, dtype; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Cast") do
         desc = NodeDescription("Cast")
         add_input(desc, x)
         desc["DstT"] = dtype
@@ -49,12 +49,12 @@ If shape is 1-D or higher, then the operation returns a tensor with shape shape 
 
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#reshape
 """
-Base.reshape(n::AbstractTensor, dims; name="Reshape") =
+Base.reshape(n::AbstractTensor, dims; name=nothing) =
   reshape(n, Tensor(Int32[dims...]); name = name)
 
-function Base.reshape(n::AbstractTensor, dims::AbstractTensor; name="Reshape")
+function Base.reshape(n::AbstractTensor, dims::AbstractTensor; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Reshape") do
         desc = NodeDescription("Reshape")
         add_input(desc, n)
         add_input(desc, dims)
@@ -62,10 +62,13 @@ function Base.reshape(n::AbstractTensor, dims::AbstractTensor; name="Reshape")
     Tensor(Operation(desc), 1)
 end
 
-Base.length(::Type{Tensor}, n::AbstractTensor; name="") = size(n, name)
+Base.length(::Type{Tensor}, n::AbstractTensor; name=nothing) = size(n, name)
 
+if isdefined(Base, :slice)  # Removed in .6
+    import Base: slice
+end
 """
-Base.slice(n::AbstractTensor, begin_, size_; name="")
+slice(n::AbstractTensor, begin_, size_; name="")
 
 Extracts a slice from a tensor.
 
@@ -91,9 +94,9 @@ A `Tensor` the same type as input.
 
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#slice
 """
-function Base.slice(n::AbstractTensor, begin_, size_; name="Slice")
+function slice(n::AbstractTensor, begin_, size_; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Slice") do
         desc = NodeDescription("Slice")
         add_input(desc, Tensor(n))
         add_input(desc, cast(Tensor(begin_), Int32))
@@ -137,9 +140,9 @@ num_split Tensor objects resulting from splitting value.
 
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#split
 """
-function Base.split(split_dim, num_split, value::AbstractTensor; name="Split")
+function Base.split(split_dim, num_split, value::AbstractTensor; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Split") do
         desc = NodeDescription("Split")
         add_input(desc, Tensor(convert_number(Int32, split_dim))-1)
         add_input(desc, Tensor(value))
@@ -152,52 +155,96 @@ end
 """
 concat(dim, values; name="")
 
+Concatenates the list of tensors `values` along dimension `dim` (1-based).  If
+`values[i].shape = [D1, D2, ... Daxis(i), ...Dn]`, the concatenated
+result has shape `[D1, D2, ... Rdim, ...Dn]`,
+where `Rdim=sum(Daxis(i))`.
+
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#concat
 """
-function concat(dim, values; name="Concat")
+function concat(dim, values; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Concat") do
         desc = NodeDescription("Concat")
-        add_input(desc, Tensor(convert_number(Int32, dim)))
+        add_input(desc, Tensor(convert_number(Int32, dim - 1)))
         add_input(desc, [Tensor(_) for _ in values])
         desc["N"] = length(values)
     end
     Tensor(Operation(desc), 1)
 end
 
-Base.cat(::Type{Tensor}, dim, values...) = concat(dim-1, values)
+Base.cat(::Type{Tensor}, dim, values...) = concat(dim, values)
+Base.cat(dim, values::AbstractTensor...) = concat(dim, values)
 
 """
-pack(values; axis=0, name="")
+pack(values; axis=1, name="")
 
 Packs a list of rank-R tensors into one rank-(R+1) tensor.
 
 Packs the list of tensors in values into a tensor with rank one higher than each tensor in values, by packing them along the axis dimension. Given a list of length N of tensors of shape (A, B, C);
 
-if axis == 0 then the output tensor will have the shape (N, A, B, C). if axis == 1 then the output tensor will have the shape (A, N, B, C). Etc.
+if axis == 1 then the output tensor will have the shape (N, A, B, C). if axis == 2 then the output tensor will have the shape (A, N, B, C). Etc.
 
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#pack
 """
-function pack(nodes; axis=0, name="Pack")
+function pack(nodes; axis=1, name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Pack") do
         desc = NodeDescription("Pack")
         add_input(desc, [Tensor(_) for _ in nodes])
         desc["N"] = length(nodes)
-        desc["axis"] = axis
+        desc["axis"] = axis -1
     end
     Tensor(Operation(desc), 1)
 end
 
-function unpack(value; num=0, axis=0, name="Unpack")
+"""
+unpack(value; num=nothing, axis=1, name="Unpack")
+
+Unpacks the given dimension of a rank-`R` tensor into rank-`(R-1)` tensors.
+
+Unpacks `num` tensors from `value` by chipping it along the `axis` dimension.
+If `num` is not specified (the default), it is inferred from `value`'s shape.
+If `value.shape[axis]` is not known, `ValueError` is raised.
+
+For example, given a tensor of shape `(A, B, C, D)`;
+
+If `axis == 0` then the i'th tensor in `output` is the slice
+  `value[i, :, :, :]` and each tensor in `output` will have shape `(B, C, D)`.
+  (Note that the dimension unpacked along is gone, unlike `split`).
+
+If `axis == 1` then the i'th tensor in `output` is the slice
+  `value[:, i, :, :]` and each tensor in `output` will have shape `(A, C, D)`.
+Etc.
+
+This is the opposite of pack.  The numpy equivalent is
+
+    tf.unpack(x, n) = list(x)
+
+Args:
+  value: A rank `R > 0` `Tensor` to be unpacked.
+  num: An `int`. The length of the dimension `axis`. Automatically inferred
+    if `None` (the default).
+  axis: An `int`. The axis to unpack along. Defaults to the first
+    dimension. Supports negative indexes.
+  name: A name for the operation (optional).
+
+Returns:
+  The list of `Tensor` objects unpacked from `value`.
+
+Raises:
+  ValueError: If `num` is unspecified and cannot be inferred.
+  ValueError: If `axis` is out of the range [-R, R).
+"""
+function unpack(value; num=nothing, axis=1, name=nothing)
+    num_split = num==nothing ? get_shape(value, axis) : num
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Unpack") do
         desc = NodeDescription("Unpack")
         add_input(desc, value)
-        desc["num"] = num
-        desc["axis"] = axis
+        desc["num"] = num_split
+        desc["axis"] = axis - 1
     end
-    num_split = num==0 ? size(value, axis) : num
     op = Operation(desc)
     [Tensor(op, _) for _ in 1:num_split]
 end
@@ -239,9 +286,9 @@ A Tensor. Has the same type as input. Contains the same data as input, but its s
 
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#expand_dims
 """
-function expand_dims(input, dim; name="ExpandDims")
+function expand_dims(input, dim; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "ExpandDims") do
         desc = NodeDescription("ExpandDims")
         add_input(desc, Tensor(input))
         add_input(desc, Tensor(convert_number(Int32,dim)))
@@ -249,12 +296,54 @@ function expand_dims(input, dim; name="ExpandDims")
     Tensor(Operation(desc), 1)
 end
 
-function Base.squeeze(x::AbstractTensor, squeeze_dims; name="squeeze")
+"""
+squeeze(x::AbstractTensor, squeeze_dims; name="squeeze")
+
+Removes dimensions of size 1 from the shape of a tensor.
+
+Given a tensor `input`, this operation returns a tensor of the same type with
+all dimensions of size 1 removed. If you don't want to remove all size 1
+dimensions, you can remove specific size 1 dimensions by specifying
+`axis`.
+
+For example:
+
+```prettyprint
+# 't' is a tensor of shape [1, 2, 1, 3, 1, 1]
+shape(squeeze(t)) ==> [2, 3]
+```
+
+Or, to remove specific size 1 dimensions:
+
+```prettyprint
+# 't' is a tensor of shape [1, 2, 1, 3, 1, 1]
+shape(squeeze(t, [2, 4])) ==> [1, 2, 3, 1]
+```
+
+Args:
+  input: A `Tensor`. The `input` to squeeze.
+  axis: An optional list of `ints`. Defaults to `[]`.
+    If specified, only squeezes the dimensions listed. The dimension
+    index starts at 0. It is an error to squeeze a dimension that is not 1.
+  name: A name for the operation (optional).
+  squeeze_dims: Deprecated keyword argument that is now axis.
+
+Returns:
+  A `Tensor`. Has the same type as `input`.
+  Contains the same data as `input`, but has one or more dimensions of
+  size 1 removed.
+
+Raises:
+  ValueError: When both `squeeze_dims` and `axis` are specified.
+"""
+function Base.squeeze(x::AbstractTensor, squeeze_dims=nothing; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Squeeze") do
         desc = NodeDescription("Squeeze")
         add_input(desc, x)
-        set_attr_list(desc, "squeeze_dims", squeeze_dims-1)
+        if !(squeeze_dims === nothing)
+            set_attr_list(desc, "squeeze_dims", squeeze_dims-1)
+        end
     end
     Tensor(Operation(desc), 1)
 end
@@ -283,9 +372,9 @@ A Tensor of type int32.
 
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#rank
 """
-function Base.rank(n::AbstractTensor; name="Rank")
+function Base.rank(n::AbstractTensor; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Rank") do
         desc = NodeDescription("Rank")
         add_input(desc, Tensor(n))
     end
@@ -297,9 +386,9 @@ Base.size(n::AbstractTensor; name="")
 
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#size
 """
-function Base.size(n::AbstractTensor; name="Size")
+function Base.size(n::AbstractTensor; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Size") do
         desc = NodeDescription("Size")
         add_input(desc, Tensor(n))
     end
@@ -324,9 +413,9 @@ A Tensor. Has the same type as input.
 
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#tile
 """
-function tile(input, multiples; name="Tile")
+function tile(input, multiples; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Tile") do
         desc = NodeDescription("Tile")
         add_input(desc, Tensor(input))
         add_input(desc, cast(Tensor(multiples), Int32))
@@ -362,9 +451,9 @@ ValueError: When mode is not one of "CONSTANT", "REFLECT", or "SYMMETRIC".
 
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#pad
 """
-function pad(tensor, paddings; mode="CONSTANT", name="Pad")
+function pad(tensor, paddings; mode="CONSTANT", name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Pad") do
         desc = NodeDescription("Pad")
         add_input(desc, Tensor(tensor))
         add_input(desc, cast(Tensor(paddings), Int32))
@@ -402,15 +491,23 @@ If indices is a permutation and length(indices) == params.shape[1] then this ope
 
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#gather
 """
-function gather(params, indices; validate_indices=true, name="Gather")
+function gather(params, indices; validate_indices=true, name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Gather") do
         desc = NodeDescription("Gather")
         add_input(desc, Tensor(params))
         add_input(desc, Tensor(indices)-1)
         desc["validate_indices"] = validate_indices
     end
     Tensor(Operation(desc), 1)
+end
+
+function Base.getindex(params::AbstractTensor, indices)
+    if eltype(indices) == Bool
+        boolean_mask(params, indices)
+    else
+        gather(params, indices)
+    end
 end
 
 @not_implemented function gather_nd()
@@ -444,9 +541,9 @@ Note: If a non-numeric data type output is desired (tf.string, tf.bool, etc.), b
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#one_hot
 
 """
-function one_hot(indices, depth; on_value=Float32(1), off_value=Float32(0), axis=-1, dtype=Float32, name="OneHot")
+function one_hot(indices, depth; on_value=Float32(1), off_value=Float32(0), axis=-1, dtype=Float32, name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "OneHot") do
         desc = NodeDescription("OneHot")
         add_input(desc, Tensor(indices)-1)
         add_input(desc, Tensor(Int32(depth)))
@@ -466,9 +563,9 @@ dynamic_partition(data, partitions, num_partitions; name="")
 
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#dynamic_partition
 """
-function dynamic_partition(data, partitions, num_partitions; name="DynamicPartition")
+function dynamic_partition(data, partitions, num_partitions; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "DynamicPartition") do
         desc = NodeDescription("DynamicPartition")
         add_input(desc, data)
         add_input(desc, partitions)
@@ -483,9 +580,9 @@ dynamic_stitch(indices, data; name="")
 
 https://www.tensorflow.org/versions/r0.10/api_docs/python/array_ops.html#dynamic_stitch
 """
-function dynamic_stitch(indices, data; name="DynamicStitch")
+function dynamic_stitch(indices, data; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "DynamicStitch") do
         desc = NodeDescription("DynamicStitch")
         add_input(desc, indices)
         add_input(desc, data)
@@ -493,7 +590,52 @@ function dynamic_stitch(indices, data; name="DynamicStitch")
     Tensor(Operation(desc), 1)
 end
 
-@not_implemented function boolean_mask(tensor, mask; name="boolean_mask")
+"""
+boolean_mask(tensor, mask)
+
+Apply boolean mask to tensor.  Numpy equivalent is `tensor[mask]`.
+
+```python
+# 1-D example
+tensor = [0, 1, 2, 3]
+mask = [True, False, True, False]
+boolean_mask(tensor, mask) ==> [0, 2]
+```
+
+In general, `0 < dim(mask) = K <= dim(tensor)`, and `mask`'s shape must match
+the first K dimensions of `tensor`'s shape.  We then have:
+  `boolean_mask(tensor, mask)[i, j1,...,jd] = tensor[i1,...,iK,j1,...,jd]`
+where `(i1,...,iK)` is the ith `True` entry of `mask` (row-major order).
+
+Args:
+  tensor:  N-D tensor.
+  mask:  K-D boolean tensor, K <= N and K must be known statically.
+  name:  A name for this operation (optional).
+
+Returns:
+  Tensor populated by entries in `tensor` corresponding to `True` values in
+    `mask`.
+
+Raises:
+  ValueError:  If shapes do not conform.
+
+Examples:
+
+```python
+# 2-D example
+tensor = [[1, 2], [3, 4], [5, 6]]
+mask = [True, False, True]
+boolean_mask(tensor, mask) ==> [[1, 2], [5, 6]]
+```
+"""
+function boolean_mask(tensor, mask; name=nothing)
+    local result
+    with_op_name(name, "BooleanMask") do
+        indices = find(mask)  # TODO generalize to more dimensions
+        squeezed = squeeze(indices, [2])
+        result = tensor[squeezed]
+    end
+    result
 end
 
 """
@@ -543,18 +685,23 @@ Args:
 Returns:
   A transposed `Tensor`.
 """
-function Base.transpose(n::AbstractTensor, perm=nothing; name="transpose")
+function Base.transpose(n::AbstractTensor, perm=nothing; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "Transpose") do
         if perm === nothing
             r = range(Tensor, 0, limit=rank(n))
             perm = reverse(r, [true])
         end
+        perm = convert_number(Int32, perm)
         desc = NodeDescription("Transpose")
         add_input(desc, Tensor(n))
         add_input(desc, Tensor(perm))
     end
     Tensor(Operation(desc))
+end
+
+function Base.permutedims(n::AbstractTensor, perm; name=nothing)
+    transpose(n, perm.-1; name=name)
 end
 
 Base.ctranspose(n::AbstractTensor) = transpose(n)

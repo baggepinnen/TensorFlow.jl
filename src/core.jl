@@ -1,5 +1,6 @@
 using ProtoBuf
 using PyCall
+using Compat
 
 import Base: setindex!, getindex, run
 
@@ -8,11 +9,32 @@ const LIBTF = joinpath(LIB_BASE, "usr", "bin", "libtensorflow_c")
 
 include("py.jl")
 
+"""
+    tf_version()
+
+Return the version number of the C tensorflow library.
+"""
+function tf_version()
+    res = ccall((:TF_Version, LIBTF), Cstring, ()) |> unsafe_string
+    # Deal with version strings like "0.12.head"
+    res = replace(res, r"\.head$", "")
+    VersionNumber(res)
+end
+
+function version_check(v)
+    if tf_version() < v
+        error("You have TensorFlow binary version $(tf_version()), but need version $v to use this functionality. Please upgrade with `Pkg.build(\"TensorFlow\").")
+    end
+end
+
 type Status
     ptr::Ptr{Void}
     function Status()
         ptr = ccall((:TF_NewStatus, LIBTF), Ptr{Void}, ())
         this = new(ptr)
+        finalizer(this, status->begin
+            ccall((:TF_DeleteStatus, LIBTF), Void, (Ptr{Void},), status.ptr)
+        end)
         this
     end
 end
@@ -29,6 +51,7 @@ type Graph
     ptr::Ptr{Void}
     collections::Dict{Symbol, Any}
     shapes::Dict{String, AbstractTensorShape}
+    name_idx::Dict{String, Int}
 
     function Graph()
         ptr = ccall((:TF_NewGraph, LIBTF), Ptr{Void}, ())
@@ -37,7 +60,7 @@ type Graph
         collections[:TrainableVariables] = []
         collections[:Summaries] = []
         collections[:QueueRunners] = []
-        self = new(ptr, collections, Dict{String, AbstractTensorShape}())
+        self = new(ptr, collections, Dict{String, AbstractTensorShape}(), Dict{String, Int}())
         finalizer(self, self->begin
             ccall((:TF_DeleteGraph, LIBTF), Void, (Ptr{Void},), self.ptr)
         end)
@@ -61,23 +84,56 @@ Returns a collection from the default graph
 """
 get_collection(name) = get_collection(get_def_graph(), name)
 
+const DEBUG_EXTEND_GRAPH = false
+
+to_node_def(n::tensorflow.NodeDef) = n
+
+function to_node_def(proto)
+    b = IOBuffer()
+    write(b, proto)
+    seekstart(b)
+    node_def = tensorflow.NodeDef()
+    readproto(b, node_def)
+    to_node_def(node_def)
+end
+
 function extend_graph(graph::Graph, node_defs)
     n_nodes = length(node_defs)
-    nodes = []
+    new_graph = tensorflow.GraphDef()
+    set_field!(new_graph, :node, tensorflow.NodeDef[])
+    import_options = GraphInputOptions()
+    ph_names = Set{String}()
     for node_idx in 1:n_nodes
-        proto = node_defs[node_idx]
-        b = IOBuffer()
-        write(b, proto)
-        seekstart(b)
-        node_def = tensorflow.NodeDef()
-        readproto(b, node_def)
+        node_def = to_node_def(node_defs[node_idx])
         if isnull(get_node_by_name(graph, node_def.name))
-            push!(nodes, node_def)
+            push!(new_graph.node, node_def)
+            for (i, input) in enumerate(node_def.input)
+                name, port = parse_port_name(input)
+                existing_node = get_node_by_name(graph, name)
+                if !isnull(existing_node)
+                    local new_name
+                    for name_id in countfrom()
+                        new_name = "$(name)__placeholder__$(name_id)"
+                        isnull(get_node_by_name(graph, new_name)) && break
+                    end
+                    node_def.input[i] = new_name
+                    import_options.input_mapping[(new_name, port)] = Tensor(get(existing_node), port)
+                    new_ph = tensorflow.NodeDef()
+                    set_field!(new_ph, :name, new_name)
+                    set_field!(new_ph, :op, "Placeholder")
+                    set_field!(new_ph, :attr, Dict{AbstractString, tensorflow.AttrValue}())
+                    new_ph.attr["dtype"] = tensorflow.AttrValue()
+                    set_field!(new_ph.attr["dtype"], :_type, node_def.attr["T"]._type)
+
+                    if new_name ∉ ph_names
+                        push!(new_graph.node, new_ph)
+                        push!(ph_names, new_name)
+                    end
+                end
+            end
         end
     end
-    for (node_idx, node) in enumerate(nodes)
-        Operation(node)
-    end
+    import_graph_def(graph, new_graph, import_options)
 end
 
 add_to_collection(name, node) = add_to_collection(get_def_graph(), name, node)
@@ -95,7 +151,6 @@ immutable TFException <: Exception
     status::Status
 end
 
-
 function check_status(status)
     if get_code(status) ≠ TF_OK
         throw(TFException(status))
@@ -103,14 +158,15 @@ function check_status(status)
     nothing
 end
 
+const def_graph = Ref{Graph}()
+
 """
 Returns the default computation graph, an object of type `Graph`.
 """
-get_def_graph() = def_graph
+get_def_graph() = def_graph[]
 
 function set_def_graph(g)
-    global def_graph
-    def_graph = g
+    def_graph[] = g
 end
 
 function as_default(f, g::Graph)
@@ -191,8 +247,8 @@ function getindex(b::Buffer)
 end
 
 function Base.convert(::Type{Array}, buf::Buffer)
-    struct = buf[]
-    array = unsafe_wrap(Array, struct.data, (struct.len,))
+    struct_ = buf[]
+    array = unsafe_wrap(Array, struct_.data, (struct_.len,))
     copy(array)
 end
 
@@ -217,6 +273,7 @@ type RawTensor
     RawTensor() = new()
 
     function RawTensor(data::Array)
+        isempty(data) && error("Creating tensors from empty arrays is not allowed")
         dims = [size(data)...]
         dt = jl_to_df_type(eltype(data))
         data = convert_major_order(data)
@@ -354,8 +411,10 @@ type NodeDescription
     function NodeDescription(graph, op_type, full_name)
         desc = ccall((:TF_NewOperation, LIBTF), Ptr{Void}, (Ptr{Void}, Cstring, Cstring), graph.ptr, op_type, full_name)
         self = new(desc, graph)
-        for control_op in vcat(op_context.control_ops)
-            add_control_input(self, control_op)
+        for control_op_set in op_context.control_ops
+            for control_op in control_op_set
+                add_control_input(self, control_op)
+            end
         end
         self
     end
@@ -386,6 +445,11 @@ type Operation <: AbstractOperation
     op_name::String
     name::String
     Operation() = new()
+end
+
+immutable Port
+    node_ptr::Ptr{Void}
+    index::Int
 end
 
 function get_input(op::Operation, idx)
@@ -465,12 +529,16 @@ end
 type OperationContext
     control_ops::Vector{Vector{Operation}}
     names::Vector{String}
+    frame_id::Int
 end
 
-const op_context = OperationContext(Vector{Operation}[], String[])
+const op_context = OperationContext(Vector{Operation}[], String[], 1)
 
-function with_op_name(f, name)
-    push!(op_context.names, get_name(name))
+function with_op_name(f, name, def_name="Node")
+    if name === nothing
+        name = get_name(def_name)
+    end
+    push!(op_context.names, name)
     f()
     pop!(op_context.names)
 end
@@ -517,20 +585,52 @@ function load_proto(tensor::tensorflow.TensorProto)
         val = tensor.int64_val
     elseif dtype == tensorflow._DataType.DT_DOUBLE
         val = tensor.double_val
+    elseif dtype == tensorflow._DataType.DT_STRING
+        val = tensor.string_val
     else
-        # warn("Unrecognized datatype $dtype")
+        warn("Unrecognized datatype $dtype")
     end
     # Sometimes Tensorflow store the tensor content in the 'tensor_content' byte array,
     # and sometimes in a typed field. Haven't figured out the rational yet.
     if length(tensor.tensor_content) > 0
-        val = reinterpret(eltype(val), tensor.tensor_content)
+        # Vector-valued string tensors are stored as eg
+        # ""\x02\x03hibye" for ["hi", "bye"]
+        if dtype == tensorflow._DataType.DT_STRING
+            bytes = tensor.tensor_content
+            sizes = Int[]
+            pos = 1
+            for i in 1:prod(dim)
+                push!(sizes, bytes[pos])
+                pos += 1
+            end
+            val = Vector{UInt8}[]
+            for i in 1:length(sizes)
+                val_i = UInt8[]
+                for j in 1:sizes[i]
+                    push!(val_i, bytes[pos])
+                    pos += 1
+                end
+                push!(val, val_i)
+            end
+        else
+            val = reinterpret(eltype(val), tensor.tensor_content)
+        end
     end
-    if length(val) == 0
+    if length(val) == 0 && length(dim) == 0
         zeros(eltype(val),0)
     elseif length(dim) == 0
         val[1]
     else
-        reshape(val, dim)
+        # https://www.tensorflow.org/api_docs/python/constant_op/constant_value_tensors#constant
+        if length(val) < prod(dim)
+            last_val = val[end]
+            original_length = length(val)
+            resize!(val, prod(dim))
+            for i in (original_length+1):length(val)
+                val[i] = last_val
+            end
+        end
+        reshape(val, reverse(dim)) |> convert_major_order
     end
 end
 
@@ -576,106 +676,6 @@ function load_proto(value::tensorflow.AttrValue)
     elseif has_field(value, :list)
         load_proto(value.list)
     end
-end
-
-# Replace this entire function once we can import protobufs into a graph
-function Operation(node_def::tensorflow.NodeDef)
-    graph = get_def_graph()
-    desc = NodeDescription(graph, node_def.op, node_def.name)
-
-    if node_def.op == "DynamicStitch"
-        inputs = []
-        ports = []
-        for input in node_def.input
-            input, port = parse_port_name(input)
-            input_node = get_node_by_name(graph, input)|>get
-            push!(inputs, input_node)
-            push!(ports, port)
-        end
-        add_input(desc, [Tensor(inputs[1], ports[1]), Tensor(inputs[2], ports[2])])
-        add_input(desc, [Tensor(inputs[3], ports[3]), Tensor(inputs[4], ports[4])])
-        return Operation(desc)
-    end
-    if node_def.op ∈ ("ConcatOffset", "Concat")
-        input, port = parse_port_name(node_def.input[1])
-        input_node = get_node_by_name(input) |> get
-        add_input(desc, Tensor(input_node, port))
-        inputs = Tensor[]
-        for idx in 2:length(node_def.input)
-            input, port = parse_port_name(node_def.input[idx])
-            input_node = get_node_by_name(input) |> get
-            push!(inputs, Tensor(input_node, port))
-        end
-        add_input(desc, inputs)
-    elseif node_def.op ∈ ("AddN", "ShapeN")
-        inputs = Tensor[]
-        for input in node_def.input
-            input, port = parse_port_name(input)
-            input_node = get_node_by_name(graph, input)|>get
-            push!(inputs, Tensor(input_node, port))
-        end
-        add_input(desc, inputs)
-    elseif node_def.op == "Pack"
-        inputs = Tensor[]
-        for input in node_def.input
-            input, port = parse_port_name(input)
-            input_node = get_node_by_name(graph, input) |> get
-            push!(inputs, Tensor(input_node, port))
-        end
-        add_input(desc, inputs)
-    else
-        for (input_idx, input) in enumerate(node_def.input)
-            input_kind = :normal
-            if input[1] == '^'
-                input_kind = :control
-                input = input[2:end]
-            end
-            input, port = parse_port_name(input)
-            input_node = get_node_by_name(graph, input)
-            if isnull(input_node)
-                warn("Could not find name $input")
-            end
-            if input_kind == :normal
-                add_input(desc, Tensor(input_node |> get, port))
-            elseif input_kind == :control
-                add_control_input(desc, input_node |> get)
-            end
-        end
-    end
-    if isdefined(node_def, :attr)  # TODO: complete this
-        for (attr_name, attr) in node_def.attr
-            if attr_name ∈ ("dtype", "T", "DstT", "SrcT", "Index")
-                ccall((:TF_SetAttrType, LIBTF), Void, (Ptr{Void}, Cstring, Cint), desc.ptr, attr_name, attr._type)
-            elseif attr_name == "value"
-                desc["value"] = RawTensor(load_proto(attr.tensor))
-            elseif attr_name == "keep_dims"
-                desc["keep_dims"] = attr.b
-            elseif attr_name == "N"
-                desc["N"] = attr.i
-            elseif attr_name == "transpose_a"
-                desc["transpose_a"] = attr.b
-            elseif attr_name == "transpose_b"
-                desc["transpose_b"] = attr.b
-            elseif attr_name == "strides"
-                set_attr_list(desc, "strides", attr.list.i)
-            elseif attr_name == "padding"
-                desc["padding"] = String(attr.s)
-            elseif attr_name == "ksize"
-                set_attr_list(desc, "ksize", attr.list.i)
-            elseif attr_name == "data_format"
-                desc["data_format"] = String(attr.s)
-            elseif attr_name == "use_cudnn_on_gpu"
-                desc["use_cudnn_on_gpu"] = attr.b
-            elseif attr_name == "axis"
-                desc["axis"] = attr.i
-            elseif attr_name ∈ ("begin_mask", "ellipsis_mask", "shrink_axis_mask", "new_axis_mask", "end_mask")
-                desc[attr_name] = attr.i
-            else
-                #warn("Unrecognized attribute $attr_name")
-            end
-        end
-    end
-    Operation(desc)
 end
 
 """
@@ -740,11 +740,6 @@ function Base.eltype(t::AbstractTensor)
     else
         return tf_to_jl_type(tf_type)
     end
-end
-
-immutable Port
-    node_ptr::Ptr{Void}
-    index::Int
 end
 
 Port(t::Tensor) = Port(t.op.ptr, t.value_index-1)
@@ -849,7 +844,8 @@ end
 
 function Base.convert(::Type{Array}, t::RawTensor)
     dims = ndims(t)
-    data = ccall((:TF_TensorData, LIBTF), Ptr{eltype(t)}, (Ptr{Void},), t.ptr)
+    data = ccall((:TF_TensorData, LIBTF), Ptr{Void}, (Ptr{Void},), t.ptr)
+    data = convert(Ptr{eltype(t)}, data)
     if eltype(t) == String
         d = size(t)
         out = String[]
@@ -989,4 +985,69 @@ Base.eltype(i::IndexedSlices) = eltype(i.values)
 type IndexedSlicesValue
     values
     indices
+end
+
+type GraphInputOptions
+    input_mapping::Dict{Tuple{String, Int}, Tensor}
+    return_output::Vector{Tuple{String, Int}}
+    control_dependencies::Vector{Operation}
+    prefix::String
+    GraphInputOptions() = new(Dict{Tuple{String, Int}, Tensor}(), Vector{Tuple{String, Int}}(), Vector{Operation}(), "")
+end
+
+function import_graph_def(graph::Graph, graph_def::Vector{UInt8}, options=GraphInputOptions())
+    version_check(v"1.0.0-rc1")
+    options_ptr = ccall((:TF_NewImportGraphDefOptions, LIBTF), Ptr{Void}, ())
+    for ((input_name, input_port), tensor) in options.input_mapping
+        ccall((:TF_ImportGraphDefOptionsAddInputMapping, LIBTF), Void,
+            (Ptr{Void}, Cstring, Cint, Port),
+            options_ptr, input_name, input_port-1, Port(tensor))
+    end
+    for (output_name, output_port) in options.return_output
+        ccall((:TF_ImportGraphDefOptionsAddReturnOutput, LIBTF), Void,
+            (Ptr{Void}, Cstring, Cint),
+            options_ptr, output_name, output_port-1)
+    end
+    for operation in options.control_dependencies
+        ccall((:TF_ImportGraphDefOptionsAddControlDependency, LIBTF), Void,
+            (Ptr{Void}, Ptr{Void}),
+            options_ptr, operation.ptr)
+    end
+    ccall((:TF_ImportGraphDefOptionsSetPrefix, LIBTF), Void,
+        (Ptr{Void}, Cstring),
+        options_ptr, options.prefix)
+    status = Status()
+    buffer = Buffer(graph_def)
+    output_ports = Vector{Port}(length(options.return_output))
+    ccall((:TF_GraphImportGraphDefWithReturnOutputs, LIBTF), Void,
+        (Ptr{Void}, Ptr{Void}, Ptr{Void}, Ptr{Void}, Cint, Ptr{Void}),
+        graph.ptr, buffer.ptr, options_ptr, output_ports, length(output_ports), status.ptr)
+    check_status(status)
+    ccall((:TF_DeleteImportGraphDefOptions, LIBTF), Void, (Ptr{Void},), options_ptr)
+    output_tensors = map(Tensor, output_ports)
+    output_tensors
+end
+
+function import_graph_def(graph::Graph, graph_def::tensorflow.GraphDef, options=GraphInputOptions())
+    b = IOBuffer()
+    writeproto(b, graph_def)
+    data = @compat take!(b)
+    import_graph_def(graph, data, options)
+end
+
+function get_operations(g::Graph)
+    # TODO switch to iterator
+    ops = Operation[]
+    pos = Ref{Csize_t}(0)
+    while true
+        op_ptr = ccall((:TF_GraphNextOperation, LIBTF), Ptr{Void},
+            (Ptr{Void}, Ref{Csize_t}),
+            g.ptr, pos)
+        op_ptr == C_NULL && break
+        op = Operation()
+        op.ptr = op_ptr
+        op.graph = Nullable(g)
+        push!(ops, op)
+    end
+    ops
 end

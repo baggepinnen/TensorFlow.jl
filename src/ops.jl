@@ -9,6 +9,7 @@ tf_promote(t, x) = Tensor(x)
 
 convert_number(t, n) = n
 convert_number(t, x::Number) =  t(x)
+convert_number(t, x::Union{AbstractArray, Tuple}) = map(t, x)
 
 to_tensor(x::Union{Number, String, AbstractTensor}) = Tensor(x)
 to_tensor(x::AbstractArray) = Tensor(x)
@@ -28,8 +29,6 @@ macro not_implemented(f)
     end
 end
 
-const name_idx = Dict{String,Int}()
-
 function capitalize(s)
     string(uppercase(s[1]), s[2:end])
 end
@@ -37,6 +36,8 @@ end
 capitalize(s::Symbol) = capitalize(string(s))
 
 function get_name(name="node")
+    graph = get_def_graph()
+    name_idx = graph.name_idx
     if name == ""
         name = "node"
     end
@@ -77,15 +78,15 @@ Returns:
   A `Tensor` that may be used as a handle for feeding a value, but not
   evaluated directly.
 """
-function placeholder(dtype; name="placeholder", shape=nothing)
+function placeholder(dtype; name=nothing, shape=nothing)
     local node
-    with_op_name(name) do
+    with_op_name(name, "placeholder") do
         graph = get_def_graph()
         desc = NodeDescription("Placeholder")
         desc["dtype"] = dtype
         node = Operation(desc)
-        if shape===nothing
-            graph.shapes[name] = ShapeInference.TensorShape(nothing)
+        if shape === nothing
+            graph.shapes[get_cur_node_name()] = ShapeInference.TensorShape(nothing)
         else
             dims = Nullable{Int}[]
             for dim in shape
@@ -111,9 +112,9 @@ Args:
 Returns:
   A `Tensor` of type `string`.
 """
-function read_file(filename; name="ReadFile")
+function read_file(filename; name=nothing)
     local desc
-    with_op_name(name) do
+    with_op_name(name, "ReadFile") do
         desc = NodeDescription("ReadFile")
         add_input(desc, Tensor(filename))
     end
